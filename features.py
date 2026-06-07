@@ -3,6 +3,7 @@ from config import CLIFF_THRESHOLD_PCT, RISK_THRESHOLD_PCT, BRAKE_ENERGY_WINDOW,
 
 def add_lap_time_norm(df: pl.DataFrame) -> pl.DataFrame:
     # Znormalizowany czas okrążenia względem mediany stintu
+    # Podstawa i powód wycieku danych- model uczy się progów
     df = df.with_columns(
         pl.col("lap_time_corr")
           .median()
@@ -13,6 +14,26 @@ def add_lap_time_norm(df: pl.DataFrame) -> pl.DataFrame:
         ((pl.col("lap_time_corr") - pl.col("stint_median_lap"))
          / pl.col("stint_median_lap") * 100)
         .alias("lap_time_norm_pct")
+    )
+    return df
+
+
+def add_quali_delta(df: pl.DataFrame) -> pl.DataFrame:
+    """Delta czasu okrążenia względem czasu kwalifikacji kierowcy [%].
+    O ile % wolniej jedzie kierowca w wyścigu względem
+    swojego czasu kwalifikacji na tym samym torze.
+    Nie zależna od bieżącego stintu i rośnie monotonicznie z wiekiem opony
+    """
+    if "quali_best_lap_s" not in df.columns:
+        # Kwalifikacje nie zostały pobrane — dodaj pustą kolumnę
+        return df.with_columns(
+            pl.lit(None).cast(pl.Float64).alias("lap_time_quali_delta_pct")
+        )
+
+    df = df.with_columns(
+        ((pl.col("lap_time_corr") - pl.col("quali_best_lap_s"))
+         / pl.col("quali_best_lap_s") * 100)
+        .alias("lap_time_quali_delta_pct")
     )
     return df
 
@@ -34,7 +55,7 @@ def add_lag_features(df: pl.DataFrame, n_lags: int = LAG_STEPS) -> pl.DataFrame:
     # Lag features — pamięć krótkoterminowa modelu
     lag_cols = ["speed_mean", "speed_std", "brake_max", "wot_pct",
                 "rpm_std", "throttle_mean", "lap_time_norm_pct",
-                "brake_energy_proxy"]
+                "lap_time_quali_delta_pct", "brake_energy_proxy"]
 
     exprs = []
     for col in lag_cols:
@@ -69,6 +90,12 @@ def add_rolling_stats(df: pl.DataFrame) -> pl.DataFrame:
           .rolling_max(window_size=5)
           .over(["session_key", "driver_number", "stint_number"])
           .alias("brake_max_rolling"),
+
+        # Trend delty względem kwalifikacji
+        (pl.col("lap_time_quali_delta_pct").rolling_mean(window_size=3)
+         - pl.col("lap_time_quali_delta_pct").rolling_mean(window_size=6))
+        .over(["session_key", "driver_number", "stint_number"])
+        .alias("quali_delta_degradation_rate"),
     ])
     return df
 
@@ -79,6 +106,7 @@ def assign_labels(df: pl.DataFrame) -> pl.DataFrame:
       0 — brak ryzyka (stabilna opona)
       1 — ryzyko umiarkowane (początek degradacji)
       2 — cliff (krytyczny spadek przyczepności)
+    Docelowo etykiety generowane PELT z ruptures.
     """
     df = df.with_columns(
         pl.when(pl.col("lap_time_norm_pct") > CLIFF_THRESHOLD_PCT)
@@ -105,6 +133,7 @@ def build_feature_matrix(df: pl.DataFrame) -> pl.DataFrame:
         raise ValueError(f"Brak wymaganych kolumn wejściowych: {missing}")
 
     df = add_lap_time_norm(df)
+    df = add_quali_delta(df)
     df = add_proxy_temperature(df)
     df = add_rolling_stats(df)
     df = add_lag_features(df)
@@ -115,6 +144,13 @@ def build_feature_matrix(df: pl.DataFrame) -> pl.DataFrame:
                 "speed_mean_lag1", "brake_max_lag1", "target"]
     existing = [c for c in required if c in df.columns]
     df = df.drop_nulls(subset=existing)
+
+    # Raport pokrycia kwalifikacji
+    if "lap_time_quali_delta_pct" in df.columns:
+        n_total = df.shape[0]
+        n_filled = df["lap_time_quali_delta_pct"].drop_nulls().shape[0]
+        print(f"  quali_delta: {n_filled}/{n_total} okien z danymi "
+              f"({100 * n_filled / n_total:.1f}%)")
 
     return df
 

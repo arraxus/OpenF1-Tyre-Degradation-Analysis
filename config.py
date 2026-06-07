@@ -32,7 +32,7 @@ METADATA_EXCLUDE = {
     "ts", "date", "session_key", "driver_number", "stint_number",
     "lap_number", "compound", "target", "lap_time_corr",
     "fuel_mass_kg", "stint_median_lap", "n_samples",
-    "location", "gp_name", "driver"
+    "location", "gp_name", "driver", "race_date", "quali_best_lap_s"
 }
 
 # MODELE (models.py)

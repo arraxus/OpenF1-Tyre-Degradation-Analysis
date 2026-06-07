@@ -122,7 +122,7 @@ def experiment_no_lap_time(df, feature_cols, splits):
     Odpowiada na pytanie badawcze.
     """
     print("\n" + "═" * 60)
-    print("EKSPERYMENT — model bez lap_time_norm_pct")
+    print("EKSPERYMENT — model XGBoost bez lap_time_norm_pct")
     print("Pytanie: czy sygnały telemetryczne wystarczą do")
     print("przewidzenia cliffu BEZ znajomości czasu okrążenia?")
     print("═" * 60)
@@ -142,12 +142,13 @@ def experiment_no_lap_time(df, feature_cols, splits):
     exclude_base.update(lap_time_cols)
 
     df_sorted = sort_df(df)
-    groups = df_sorted["session_key"].to_numpy()
 
+    group_col = "race_date" if "race_date" in df_sorted.columns else "session_key"
+    groups_tel = df_sorted[group_col].to_numpy()
     X_tel = df_sorted.select(tel_cols).to_numpy().astype(np.float32)
     y = df_sorted["target"].to_numpy().astype(np.int32)
 
-    splits_tel = chronological_split(X_tel, y, groups, n_splits=3)
+    splits_tel = chronological_split(X_tel, y, groups_tel, n_splits=3)
 
     train_idx, test_idx = splits_tel[-1]
     X_tr, y_tr = X_tel[train_idx], y[train_idx]

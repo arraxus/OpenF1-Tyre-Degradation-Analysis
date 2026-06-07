@@ -6,7 +6,8 @@ from config import BASE, RAW, API_RATE_LIMIT_PER_SECOND, API_RATE_LIMIT_PER_MINU
 from rate_limiter import RateLimiter
 
 # Jedna globalna instancja — współdzielona przez cały pipeline
-_limiter = RateLimiter(per_second=API_RATE_LIMIT_PER_SECOND, per_minute=API_RATE_LIMIT_PER_MINUTE)
+_limiter = RateLimiter(per_second=API_RATE_LIMIT_PER_SECOND,
+                       per_minute=API_RATE_LIMIT_PER_MINUTE)
 
 def get(endpoint: str, params: dict, *, force: bool = False) -> list:
     """
@@ -55,6 +56,54 @@ def get_race_sessions(year: int = 2025) -> pl.DataFrame:
         "session_key", "location", "country_name",
         "date_start", "date_end", "circuit_short_name"
     ]).sort("date_start")
+
+
+def get_quali_session_key(location: str, year: int = 2025) -> int | None:
+    # Zwraca session_key kwalifikacji dla danej lokalizacji i roku
+    data = get("sessions", {"year": year, "session_name": "Qualifying",
+                            "location": location})
+    if not data:
+        return None
+    # Bierzemy ostatnią kwalifikację jeśli jest ich kilka (Sprint weekend)
+    df = pl.DataFrame(data).sort("date_start")
+    return int(df["session_key"][-1])
+
+
+def get_quali_fastest_laps(location: str, year: int = 2025) -> pl.DataFrame:
+    """
+    Zwraca najlepszy czas okrążenia każdego kierowcy z kwalifikacji.
+    Pobieramy laps dla sesji kwalifikacji i bierzemy
+    minimum lap_duration per kierowca (czas ustawiony w Q3/Q2/Q1).
+    DataFrame z kolumnami [driver_number, quali_best_lap_s].
+    """
+    sk = get_quali_session_key(location, year)
+    if sk is None:
+        print(f"  [WARN] Brak sesji kwalifikacji dla {location} {year}")
+        return pl.DataFrame(schema={"driver_number": pl.Int64,
+                                    "quali_best_lap_s": pl.Float64})
+
+    # Pobieramy laps dla wszystkich kierowców przez endpoint bez filtrowania kierowcy
+    # query po session_key bez driver_number
+    data = get("laps", {"session_key": sk})
+    if not data:
+        return pl.DataFrame(schema={"driver_number": pl.Int64,
+                                    "quali_best_lap_s": pl.Float64})
+
+    df = pl.DataFrame(data)
+
+    # Filtruj tylko zapisane okrążenia z czasem (odrzuć nulle i pit-outy)
+    required = {"driver_number", "lap_duration"}
+    if not required.issubset(set(df.columns)):
+        print(f"  [WARN] Brak wymaganych kolumn w laps kwalifikacji: {df.columns}")
+        return pl.DataFrame(schema={"driver_number": pl.Int64,
+                                    "quali_best_lap_s": pl.Float64})
+
+    best = (
+        df.filter(pl.col("lap_duration").is_not_null() & (pl.col("lap_duration") > 0))
+        .group_by("driver_number")
+        .agg(pl.col("lap_duration").min().alias("quali_best_lap_s"))
+    )
+    return best.with_columns(pl.col("driver_number").cast(pl.Int64))
 
 def get_drivers(session_key: int) -> pl.DataFrame:
     data = get("drivers", {"session_key": session_key})
@@ -171,19 +220,27 @@ def get_pit(session_key: int, driver_number: int) -> pl.DataFrame:
 
 if __name__ == "__main__":
     sessions = get_race_sessions(2025)
+    print("Znalezione sesje wyścigowe:")
     print(sessions)
 
     # Wybierz pierwsze GP do testów
     sk = sessions["session_key"][0]
-    print(f"\nSession key: {sk}")
+    loc = sessions["location"][0]
+    print(f"\nSession key: {sk}, location: {loc}")
 
+    # Test pobrania kierowców i czasów klasyfikacji
     drivers = get_drivers(sk)
+    quali = get_quali_fastest_laps(loc, 2025)
+    print(f"\nKierowcy w sesji {sk} ({loc}):")
     print(drivers)
+    print(f"\nKwalifikacje - najlepsze czasy ({loc}):")
+    print(quali.sort("quali_best_lap_s").head(5))
 
     # Test dla jednego kierowcy
     dn = int(drivers["driver_number"][0])
     car = get_car_data(sk, dn)
     laps = get_laps(sk, dn)
+    print(f"\nDane dla kierowcy #{dn} ({loc}) - Wyścig:")
     print(f"\ncar_data shape: {car.shape}")
     print(f"laps shape:     {laps.shape}")
     print(car.head(3))

@@ -16,33 +16,41 @@ from config import PROC, METADATA_EXCLUDE, N_SPLITS, OPTUNA_TRIALS, RANDOM_STATE
 
 def sort_df(df: pl.DataFrame) -> pl.DataFrame:
     # Jedno źródło dla sortowania chronologicznego
-    return df.sort(["session_key", "driver_number", "stint_number", "tyre_life"])
+    sort_cols = (
+        ["race_date", "driver_number", "stint_number", "tyre_life"]
+        if "race_date" in df.columns
+        else ["session_key", "driver_number", "stint_number", "tyre_life"]
+    )
+    return df.sort(sort_cols)
 
 def prepare_data(df: pl.DataFrame) -> tuple:
-    """
-    Zwraca X (numpy), y (numpy), grupy GP (do TimeSeriesSplit), oraz listę nazw cech.
-    Dane sortowane chronologicznie po date_start GP, żeby TimeSeriesSplit miał sens.
-    """
+    # Zwraca X (numpy), y (numpy), grupy GP (do TimeSeriesSplit), oraz listę nazw cech
     # Importowany zbiór metadanych/kolumn do wykluczenia
     exclude = set(METADATA_EXCLUDE)
 
     # Dodatkowe kolumny specyficzne dla przygotowania danych (kolumny współliniowe)
     exclude.update({
-        "lap_time_rolling_mean",  # r≈1.0 z lap_time_norm_pct
+        "lap_time_rolling_mean",  # r ok. 1.0 z lap_time_norm_pct
+        "race_date",
     })
 
-    feature_cols = [c for c in df.columns if c not in exclude
+    feature_cols = [c for c in df.columns
+                    if c not in exclude
                     and df[c].dtype in (pl.Float64, pl.Float32,
                                         pl.Int64, pl.Int32, pl.Int8)]
 
-    # Sortowanie chronologiczne po session_key (proxy daty wyścigu)
     df = sort_df(df)
 
     X = df.select(feature_cols).to_numpy().astype(np.float32)
     y = df["target"].to_numpy().astype(np.int32)
 
-    # Grupy GP — do stratyfikowanego TimeSeriesSplit
-    groups = df["session_key"].to_numpy()
+    # Grupy GP — jedna wartość per wyścig; race_date jeśli dostępna, inaczej session_key
+    if "race_date" in df.columns:
+        groups = df["race_date"].to_numpy()
+    else:
+        print("⚠️  Brak kolumny race_date — session_key do grup")
+        print("   Kolejność foldów może nie odpowiadać kalendarzowi")
+        groups = df["session_key"].to_numpy()
 
     print(f"Cechy: {len(feature_cols)}")
     print(f"Próbki: {X.shape[0]}")
@@ -72,6 +80,8 @@ def chronological_split(X, y, groups, n_splits=N_SPLITS):
               f"({len(train_idx)} wierszy), "
               f"test={len(test_sessions)} GP "
               f"({len(test_idx)} wierszy)")
+        print(f"    Trening:  {train_sessions}")
+        print(f"    Test:     {test_sessions}")
 
     return splits
 
@@ -79,10 +89,7 @@ def chronological_split(X, y, groups, n_splits=N_SPLITS):
 # 2. DECISION TREE — baseline interpretowalny
 
 def train_decision_tree(X, y, splits, feature_cols):
-    """
-    Trenuje Decision Tree na ostatnim (największym) foldzie.
-    Wypisuje reguły i rysuje drzewo.
-    """
+    # Trenuje Decision Tree na każdym foldzie, wybiera najlepszy
     print("\n" + "═" * 60)
     print("MODEL 1 — Decision Tree (baseline)")
     print("═" * 60)
@@ -98,7 +105,6 @@ def train_decision_tree(X, y, splits, feature_cols):
     results = []
     best_model = None
     best_f1    = -1
-
     last_y_te = None
     last_y_pred = None
 
@@ -155,11 +161,6 @@ def train_decision_tree(X, y, splits, feature_cols):
     # Confusion matrix (ostatni fold) — użyj predykcji z pętli
     if last_y_te is not None and last_y_pred is not None:
         plot_confusion_matrix(last_y_te, last_y_pred, "Decision Tree", "dt_cm.png")
-    else:
-        train_idx, test_idx = splits[-1]
-        best_model.fit(X[train_idx], y[train_idx])
-        y_pred_last = best_model.predict(X[test_idx])
-        plot_confusion_matrix(y[test_idx], y_pred_last, "Decision Tree", "dt_cm.png")
 
     return best_model, np.mean(results)
 
@@ -169,21 +170,21 @@ def train_decision_tree(X, y, splits, feature_cols):
 def objective_xgb(trial, X, y, splits):
     # Funkcja celu dla Optuna
     params = {
-        "n_estimators":       trial.suggest_int("n_estimators", 100, 500),
-        "max_depth":          trial.suggest_int("max_depth", 3, 8),
-        "learning_rate":      trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "subsample":          trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree":   trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "min_child_weight":   trial.suggest_int("min_child_weight", 1, 20),
-        "gamma":              trial.suggest_float("gamma", 0, 5),
-        "reg_alpha":          trial.suggest_float("reg_alpha", 1e-4, 10, log=True),
-        "reg_lambda":         trial.suggest_float("reg_lambda", 1e-4, 10, log=True),
-        "objective":          "multi:softprob",
-        "num_class":          3,
-        "eval_metric":        "mlogloss",
-        "random_state":       RANDOM_STATE,
-        "tree_method":        "hist",
-        "device":             "cpu",
+        "n_estimators":     trial.suggest_int("n_estimators", 100, 500),
+        "max_depth":        trial.suggest_int("max_depth", 3, 8),
+        "learning_rate":    trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        "subsample":        trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+        "gamma":            trial.suggest_float("gamma", 0, 5),
+        "reg_alpha":        trial.suggest_float("reg_alpha", 1e-4, 10, log=True),
+        "reg_lambda":       trial.suggest_float("reg_lambda", 1e-4, 10, log=True),
+        "objective":        "multi:softprob",
+        "num_class":        3,
+        "eval_metric":      "mlogloss",
+        "random_state":     RANDOM_STATE,
+        "tree_method":      "hist",
+        "device":           "cpu",
     }
 
     f1s = []
@@ -202,7 +203,6 @@ def objective_xgb(trial, X, y, splits):
                   eval_set=[(X_te, y_te)], verbose=False)
         y_pred = model.predict(X_te)
         f1s.append(f1_score(y_te, y_pred, average="macro", zero_division=0))
-
     return np.mean(f1s)
 
 
