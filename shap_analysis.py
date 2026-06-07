@@ -233,7 +233,7 @@ def compare_calibration(model_uncal, model_cal, X_test, y_test, feature_cols):
         print(f"  {name:<15} przed: {brier_uncal_list[k]:.4f}  |  po: {brier_cal_list[k]:.4f}  |  "
               f"zmiana: {brier_cal_list[k] - brier_uncal_list[k]:+.4f}")
 
-    # Analiza per klasa — extremes prawdopodobieństw
+    # Analiza per klasa — prawdopodobieństw
     print(f"\n📈 ROZKŁAD PRAWDOPODOBIEŃSTW (klasa Stan 2):")
     print(f"{'Statystyka':<25} {'Przed kalibracją':>20} {'Po kalibracji':>20}")
     print("-" * 65)

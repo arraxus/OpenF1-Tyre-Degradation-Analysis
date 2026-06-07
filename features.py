@@ -217,7 +217,7 @@ def assign_labels_pelt(
             if diff == 0:
                 break
 
-        # segment ids
+        # Segemnty
         seg_id = np.zeros(n, dtype=int)
         start = 0
         for sid, end in enumerate(best_bkps):
@@ -225,7 +225,7 @@ def assign_labels_pelt(
             start = end
 
         uniq = np.unique(seg_id)
-        # compute segment means and lengths
+        # Obliczenia m.in. średniej
         seg_means = []
         seg_lens = []
         for u in uniq:
@@ -235,34 +235,34 @@ def assign_labels_pelt(
         seg_means = np.array(seg_means)
         seg_lens = np.array(seg_lens)
 
-        # identify candidate cliff segment: the one with max mean
+        # Zidentyfikuj kandydata do cliffu
         max_idx = int(np.argmax(seg_means))
         max_mean = seg_means[max_idx]
         prev_mean = seg_means[max_idx - 1] if max_idx > 0 else np.nan
         prev_mean = float(prev_mean) if not np.isnan(prev_mean) else np.nan
 
-        # default mapping: map segments by rank -> 0..2 (cap to 2)
+        # Podstawowe mapowanie: map segments by rank -> 0..2 (cap to 2)
         if len(uniq) == 1:
             target = np.zeros(n, dtype=np.int8)
         else:
-            # map segments to provisional states by ranking their mean (lowest->0, mid->1, highest->2)
-            ranks = np.argsort(np.argsort(seg_means))  # gives rank per segment: 0..k-1
-            # scale ranks into 0..2
+            # Mapowanie by ranking their mean (lowest->0, mid->1, highest->2)
+            ranks = np.argsort(np.argsort(seg_means))  # Ranga dla segmentu: 0..k-1
+            # Skala rang
             if ranks.max() > 0:
                 scaled = (ranks / ranks.max() * 2.0).round().astype(int)
             else:
                 scaled = ranks.astype(int)
-            # build target from segment mapping
+            # Zbuduj cel
             seg_to_state = {u: int(scaled[i]) if i < len(scaled) else 1 for i, u in enumerate(uniq)}
             target = np.array([seg_to_state[s] for s in seg_id], dtype=np.int8)
 
-        # Post-processing: require that highest-mean segment satisfies jump/mean-diff/length rules to be cliff
+        # Post-processing
         candidate_mask = seg_id == uniq[max_idx]
         candidate_len = seg_lens[max_idx]
         candidate_frac = candidate_len / max(n, 1)
 
         is_cliff = False
-        # check absolute mean diff if previous exists
+
         if not np.isnan(prev_mean):
             abs_diff_ok = (max_mean - prev_mean) >= min_mean_diff
             rel_diff_ok = (prev_mean == 0 and max_mean > 0) or (prev_mean > 0 and (max_mean / prev_mean) >= min_relative_diff)
@@ -272,15 +272,15 @@ def assign_labels_pelt(
 
         jump_ok = max_jump >= jump_threshold
 
-        # Cliff only if one of differences is satisfied AND (either jump_ok OR length small enough)
+        # Cliff tylko wtedy gdy jedna z różnic jest spełniona
         if (abs_diff_ok or rel_diff_ok) and (jump_ok or (candidate_frac <= max_cliff_frac and (max_cliff_len is None or candidate_len <= max_cliff_len))):
             is_cliff = True
 
         if not is_cliff:
-            # downgrade candidate-2 to 1 (ryzyko) if it was assigned 2
+            # Zmniejsz kandydata na 2 do 1 (ryzyko), jeśli miał przypisane 2
             target[candidate_mask] = np.where(target[candidate_mask] == 2, 1, target[candidate_mask]).astype(np.int8)
 
-        # Safety: ensure labels in {0,1,2}
+        # Upewnij się co do właściwych etykiet
         target = np.clip(target, 0, 2).astype(np.int8)
         out_parts.append(pl.DataFrame({"row_id": row_ids, "target": target}))
 
