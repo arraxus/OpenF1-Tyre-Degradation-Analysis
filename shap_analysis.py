@@ -517,7 +517,7 @@ def live_feed_comparison(model_uncal, model_cal, df: pl.DataFrame,
     cliff_mask = y_true == 2
     if cliff_mask.any():
         ax.scatter(tyre_ages[cliff_mask], proba_uncal[cliff_mask, 2],
-                   color="#d62728", s=150, marker="*", edgecolors="black",
+                   color="#d62728", s=150, marker="o", edgecolors="black",
                    linewidths=1, zorder=5, label="Stan 2 (rzeczywisty)")
 
     ax.axhline(0.5, color="gray", linestyle="--", alpha=0.5, linewidth=1, label="Próg 0.5")
