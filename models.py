@@ -6,6 +6,7 @@ from sklearn.metrics import (
     classification_report, confusion_matrix,
     ConfusionMatrixDisplay, f1_score
 )
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 import xgboost as xgb
 import optuna
 import warnings
@@ -254,13 +255,50 @@ def train_xgboost(X, y, splits, feature_cols):
         verbose=False,
     )
 
+    # Predykcje przed kalibracją
     y_pred = final_model.predict(X_te)
+
     f1 = f1_score(y_te, y_pred, average="macro", zero_division=0)
     print(f"\nF1-macro (test fold): {f1:.4f}")
     print(classification_report(y_te, y_pred,
-                                target_names=["Stan0","Stan1","Stan2"],
+                                target_names=["Stan0", "Stan1", "Stan2"],
                                 zero_division=0))
 
+    # Utwórz bazowy estimator (nowy, nie prefit)
+    base_for_cal = xgb.XGBClassifier(**best_params)
+
+    # Kalibracja prawdopodobieństw na osobnym zbiorze walidacyjnym
+    # cv=3 (albo inna liczba >=2) method='sigmoid' dla małej liczby próbek/klas rzadkich
+    calibrated_model = CalibratedClassifierCV(
+        estimator=base_for_cal,
+        method="sigmoid",
+        cv=3
+    )
+    # Fit kalibratora na zbiorze walidacyjnym (X_te, y_te)
+    calibrated_model.fit(X_te, y_te)
+
+    # Probki i predykcje po kalibracji
+    y_proba_before = final_model.predict_proba(X_te)
+    y_proba_after = calibrated_model.predict_proba(X_te)
+    y_pred_cal = np.argmax(y_proba_after, axis=1)
+
+    # Ocena
+    f1_cal = f1_score(y_te, y_pred_cal, average="macro", zero_division=0)
+    print(f"\nF1-macro po kalibracji (na zbiorze walidacyjnym): {f1_cal:.4f}")
+    print(classification_report(y_te, y_pred_cal,
+                                target_names=["Stan0", "Stan1", "Stan2"],
+                                zero_division=0))
+
+    # Reliability diagram dla klasy 2
+    plot_calibration_curve(
+        y_te,
+        y_proba_before,
+        proba_after=y_proba_after,
+        class_idx=2,
+        fname="calibration_curve_stan2.png"
+    )
+
+    # Confusion matrix i feature importance
     plot_confusion_matrix(y_te, y_pred, "XGBoost", "xgb_cm.png")
     plot_feature_importance(final_model, feature_cols)
 
@@ -268,7 +306,10 @@ def train_xgboost(X, y, splits, feature_cols):
     import pickle
     with open(PROC / "xgb_model.pkl", "wb") as f:
         pickle.dump(final_model, f)
+    with open(PROC / "xgb_calibrated_model.pkl", "wb") as f:
+        pickle.dump(calibrated_model, f)
     print(f"Model zapisany: {PROC / 'xgb_model.pkl'}")
+    print(f"Model skalibrowany zapisany: {PROC / 'xgb_calibrated_model.pkl'}")
 
     return final_model, f1, best_params
 
@@ -313,6 +354,37 @@ def plot_feature_importance(model, feature_cols: list, top_n: int = 20):
     ax.set_title(f"Top {top_n} cech — XGBoost")
     plt.tight_layout()
     plt.savefig(PROC / "xgb_feature_importance.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+
+def plot_calibration_curve(y_true, proba_before, proba_after=None, class_idx: int = 2, fname: str = "calibration_curve.png"):
+    """
+    Reliability diagram dla wskazanej klasy.
+    Domyślnie class_idx=2, bo to najbardziej interesująca i rzadka klasa.
+    """
+    y_true_bin = (np.asarray(y_true) == class_idx).astype(int)
+
+    frac_pos_b, mean_pred_b = calibration_curve(
+        y_true_bin, proba_before[:, class_idx], n_bins=10, strategy="uniform"
+    )
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.plot(mean_pred_b, frac_pos_b, "o-", label="XGBoost przed kalibracją", color="#d62728")
+
+    if proba_after is not None:
+        frac_pos_a, mean_pred_a = calibration_curve(
+            y_true_bin, proba_after[:, class_idx], n_bins=10, strategy="uniform"
+        )
+        ax.plot(mean_pred_a, frac_pos_a, "o-", label="Po kalibracji", color="#1f77b4")
+
+    ax.plot([0, 1], [0, 1], "--", color="gray", label="Idealna kalibracja")
+    ax.set_xlabel("Średnie przewidywane prawdopodobieństwo")
+    ax.set_ylabel("Rzeczywisty odsetek pozytywnych")
+    ax.set_title(f"Calibration curve — klasa Stan {class_idx}")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(PROC / fname, dpi=150, bbox_inches="tight")
     plt.show()
 
 

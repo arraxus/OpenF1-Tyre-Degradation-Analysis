@@ -1,0 +1,12 @@
+numpy
+polars>=1.40.1
+pandas
+requests
+scipy
+ruptures
+scikit-learn>=1.8.0
+xgboost>=2.1.4
+optuna>=4.8.0
+shap>=0.51
+matplotlib
+pyarrow

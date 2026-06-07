@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import shap
+from sklearn.metrics import log_loss, brier_score_loss, f1_score
 from features import METADATA_EXCLUDE
 from eda import _sanitize_fname
 from models import prepare_data, chronological_split, sort_df
@@ -182,7 +183,127 @@ def experiment_no_lap_time(df, feature_cols, splits):
     return model_tel, f1, tel_cols
 
 
-# 3. LIVE FEED — symulacja predykcji w czasie rzeczywistym
+# 3. PORÓWANIE XGBOOST — przed i po kalibracji
+
+def compare_calibration(model_uncal, model_cal, X_test, y_test, feature_cols):
+    """
+    Porównuje model oryginalny vs skalibrowany.
+    Pokazuje metryki kalibracji i wizualizacje.
+    """
+    print("\n" + "═" * 70)
+    print("RAPORT PORÓWNAWCZY — Kalibracja prawdopodobieństw")
+    print("═" * 70)
+
+    # Predykcje
+    y_pred_uncal = model_uncal.predict(X_test)
+    y_pred_cal = model_cal.predict(X_test)
+
+    y_proba_uncal = model_uncal.predict_proba(X_test)
+    y_proba_cal = model_cal.predict_proba(X_test)
+
+    # Metryki
+    f1_uncal = f1_score(y_test, y_pred_uncal, average="macro", zero_division=0)
+    f1_cal = f1_score(y_test, y_pred_cal, average="macro", zero_division=0)
+
+    log_loss_uncal = log_loss(y_test, y_proba_uncal)
+    log_loss_cal = log_loss(y_test, y_proba_cal)
+
+    # Brier Score dla wszystkich 3 klas (uśredniony)
+    brier_uncal_list = []
+    brier_cal_list = []
+    for k in range(3):
+        y_bin = (y_test == k).astype(int)
+        brier_uncal_list.append(brier_score_loss(y_bin, y_proba_uncal[:, k]))
+        brier_cal_list.append(brier_score_loss(y_bin, y_proba_cal[:, k]))
+
+    brier_uncal = np.mean(brier_uncal_list)
+    brier_cal = np.mean(brier_cal_list)
+
+    print(f"\n📊 METRYKI:")
+    print(f"{'Metrika':<25} {'Przed kalibracją':>20} {'Po kalibracji':>20} {'Zmiana':>15}")
+    print("-" * 80)
+    print(f"{'F1-macro':<25} {f1_uncal:>20.4f} {f1_cal:>20.4f} {f1_cal - f1_uncal:>+15.4f}")
+    print(f"{'Log Loss':<25} {log_loss_uncal:>20.4f} {log_loss_cal:>20.4f} {log_loss_cal - log_loss_uncal:>+15.4f}")
+    print(f"{'Brier Score (avg)':<25} {brier_uncal:>20.4f} {brier_cal:>20.4f} {brier_cal - brier_uncal:>+15.4f}")
+
+    # Per-class Brier
+    print(f"\nBrier Score per klasa:")
+    class_names = ["Stan 0", "Stan 1", "Stan 2"]
+    for k, name in enumerate(class_names):
+        print(f"  {name:<15} przed: {brier_uncal_list[k]:.4f}  |  po: {brier_cal_list[k]:.4f}  |  "
+              f"zmiana: {brier_cal_list[k] - brier_uncal_list[k]:+.4f}")
+
+    # Analiza per klasa — extremes prawdopodobieństw
+    print(f"\n📈 ROZKŁAD PRAWDOPODOBIEŃSTW (klasa Stan 2):")
+    print(f"{'Statystyka':<25} {'Przed kalibracją':>20} {'Po kalibracji':>20}")
+    print("-" * 65)
+
+    p_uncal_c2 = y_proba_uncal[:, 2]
+    p_cal_c2 = y_proba_cal[:, 2]
+
+    print(f"{'Min':<25} {np.min(p_uncal_c2):>20.4f} {np.min(p_cal_c2):>20.4f}")
+    print(f"{'Q1 (25%)':<25} {np.percentile(p_uncal_c2, 25):>20.4f} {np.percentile(p_cal_c2, 25):>20.4f}")
+    print(f"{'Mediana':<25} {np.median(p_uncal_c2):>20.4f} {np.median(p_cal_c2):>20.4f}")
+    print(f"{'Q3 (75%)':<25} {np.percentile(p_uncal_c2, 75):>20.4f} {np.percentile(p_cal_c2, 75):>20.4f}")
+    print(f"{'Max':<25} {np.max(p_uncal_c2):>20.4f} {np.max(p_cal_c2):>20.4f}")
+    print(f"{'Std dev':<25} {np.std(p_uncal_c2):>20.4f} {np.std(p_cal_c2):>20.4f}")
+
+    # Liczba "pewnych" predykcji (P > 0.9 lub P < 0.1)
+    extreme_uncal = np.sum((p_uncal_c2 > 0.9) | (p_uncal_c2 < 0.1))
+    extreme_cal = np.sum((p_cal_c2 > 0.9) | (p_cal_c2 < 0.1))
+
+    print(f"\n🎯 PEWNE PREDYKCJE (P(Stan 2) > 0.9 lub < 0.1):")
+    print(f"{'Przed kalibracją':<25} {extreme_uncal:>20} ({100 * extreme_uncal / len(y_test):.1f}%)")
+    print(f"{'Po kalibracji':<25} {extreme_cal:>20} ({100 * extreme_cal / len(y_test):.1f}%)")
+
+    # Wizualizacja — rozkład prawdopodobieństw
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    axes[0].hist(p_uncal_c2, bins=30, alpha=0.7, color="#d62728", edgecolor="black")
+    axes[0].set_xlabel("P(Stan 2)")
+    axes[0].set_ylabel("Liczba próbek")
+    axes[0].set_title("Rozkład — Przed kalibracją")
+    axes[0].grid(alpha=0.3)
+
+    axes[1].hist(p_cal_c2, bins=30, alpha=0.7, color="#1f77b4", edgecolor="black")
+    axes[1].set_xlabel("P(Stan 2)")
+    axes[1].set_ylabel("Liczba próbek")
+    axes[1].set_title("Rozkład — Po kalibracji")
+    axes[1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(PROC / "calibration_comparison_hist.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+    # Violin plot porównanie
+    fig, ax = plt.subplots(figsize=(8, 6))
+    parts = ax.violinplot(
+        [p_uncal_c2, p_cal_c2],
+        positions=[1, 2],
+        widths=0.7,
+        showmeans=True,
+        showmedians=True
+    )
+    ax.set_xticks([1, 2])
+    ax.set_xticklabels(["Przed kalibracją", "Po kalibracji"])
+    ax.set_ylabel("P(Stan 2)")
+    ax.set_title("Rozkład prawdopodobieństw — klasa Stan 2")
+    ax.grid(alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(PROC / "calibration_comparison_violin.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+    return {
+        "f1_uncal": f1_uncal,
+        "f1_cal": f1_cal,
+        "log_loss_uncal": log_loss_uncal,
+        "log_loss_cal": log_loss_cal,
+        "brier_uncal": brier_uncal,
+        "brier_cal": brier_cal,
+    }
+
+
+# 4. LIVE FEED — symulacja predykcji w czasie rzeczywistym
 
 def live_feed_simulation(model, df: pl.DataFrame,
                          feature_cols: list,
@@ -340,7 +461,84 @@ def _plot_live_feed(tyre_ages, state_history, prob_history, y_true,
     plt.show()
 
 
-# 4. GŁÓWNY PIPELINE
+def live_feed_comparison(model_uncal, model_cal, df: pl.DataFrame,
+                         feature_cols: list,
+                         session_key: int, driver: str,
+                         stint_number: int):
+    """
+    Pokazuje live feed dla modelu przed i po kalibracji
+    na jednym wykresie (dwie krzywe P(Stan 2)).
+    """
+    print(f"\n{'─' * 70}")
+    print(f"LIVE FEED PORÓWNANIE: {driver} | session {session_key} | stint {stint_number}")
+    print("─" * 70)
+
+    stint_df = (
+        df.filter(
+            (pl.col("session_key") == session_key) &
+            (pl.col("driver") == driver) &
+            (pl.col("stint_number") == stint_number)
+        )
+        .sort("tyre_life")
+    )
+
+    if stint_df.shape[0] == 0:
+        print("❌ Brak danych dla tego stintu!")
+        return
+
+    avail = [c for c in feature_cols if c in stint_df.columns]
+    X_stint = stint_df.select(avail).to_numpy().astype(np.float32)
+    y_true = stint_df["target"].to_numpy()
+
+    # Uzupełnij NaN medianą
+    col_medians = np.nanmedian(X_stint, axis=0)
+    for j in range(X_stint.shape[1]):
+        mask = np.isnan(X_stint[:, j])
+        X_stint[mask, j] = col_medians[j]
+
+    # Predykcje
+    proba_uncal = model_uncal.predict_proba(X_stint)
+    proba_cal = model_cal.predict_proba(X_stint)
+
+    tyre_ages = stint_df["tyre_life"].to_numpy() if "tyre_life" in stint_df.columns \
+        else np.arange(len(y_true))
+    compound = stint_df["compound"][0] if "compound" in stint_df.columns else "?"
+    gp_name = stint_df["gp_name"][0] if "gp_name" in stint_df.columns else "?"
+
+    # Wykres
+    fig, ax = plt.subplots(figsize=(14, 6))
+
+    ax.plot(tyre_ages, proba_uncal[:, 2], "o-", color="#d62728",
+            linewidth=2.5, markersize=4, label="P(Stan 2) — przed kalibracją", alpha=0.8)
+    ax.plot(tyre_ages, proba_cal[:, 2], "s-", color="#1f77b4",
+            linewidth=2.5, markersize=4, label="P(Stan 2) — po kalibracji", alpha=0.8)
+
+    # Zaznacz prawdę (gdzie rzeczywiście jest Stan 2)
+    cliff_mask = y_true == 2
+    if cliff_mask.any():
+        ax.scatter(tyre_ages[cliff_mask], proba_uncal[cliff_mask, 2],
+                   color="#d62728", s=150, marker="*", edgecolors="black",
+                   linewidths=1, zorder=5, label="Stan 2 (rzeczywisty)")
+
+    ax.axhline(0.5, color="gray", linestyle="--", alpha=0.5, linewidth=1, label="Próg 0.5")
+    ax.set_xlabel("Wiek opony [okrążenia]", fontsize=11)
+    ax.set_ylabel("Prawdopodobieństwo", fontsize=11)
+    ax.set_ylim(-0.05, 1.05)
+    ax.legend(loc="upper left", fontsize=10)
+    ax.grid(alpha=0.3)
+    ax.set_title(
+        f"Live Feed Porównanie (Kalibracja) | {driver} | {gp_name} | "
+        f"stint {stint_number} | {compound}",
+        fontsize=12
+    )
+
+    plt.tight_layout()
+    out_name = PROC / f"calibration_livefeed_comparison_{session_key}_{driver}_stint{stint_number}.png"
+    plt.savefig(out_name, dpi=150, bbox_inches="tight")
+    print(f"Zapisano: {out_name}")
+    plt.show()
+
+# 5. GŁÓWNY PIPELINE
 
 if __name__ == "__main__":
     print("Wczytywanie danych i modelu...")
@@ -349,13 +547,25 @@ if __name__ == "__main__":
     X, y, groups, feature_cols = prepare_data(df)
     splits = chronological_split(X, y, groups, n_splits=3)
 
-    # Załaduj wytrenowany model
+    # Załaduj oba modele
     import pickle
+
     with open(PROC / "xgb_model.pkl", "rb") as f:
         xgb_model = pickle.load(f)
 
-    # 1. SHAP
+    try:
+        with open(PROC / "xgb_calibrated_model.pkl", "rb") as f:
+            xgb_calibrated = pickle.load(f)
+        print("Załadowano model skalibrowany\n")
+    except FileNotFoundError:
+        print("Model skalibrowany nie znaleziony!")
+        xgb_calibrated = None
+
+    # Przygotuj dane testowe (z ostatniego folda)
     train_idx, test_idx = splits[-1]
+    X_test, y_test = X[test_idx], y[test_idx]
+
+    # 1. SHAP
     explainer, shap_values, X_sample, y_sample, _ = run_shap_analysis(
         xgb_model, X[test_idx], y[test_idx], feature_cols
     )
@@ -366,15 +576,21 @@ if __name__ == "__main__":
 
     plot_shap_bar_all_classes(shap_values, feature_cols)
 
-    # 2. EKSPERYMENT bez lap_time
+    # 2. RAPORT KALIBRACJI
+    if xgb_calibrated is not None:
+        cal_report = compare_calibration(
+            xgb_model, xgb_calibrated, X_test, y_test, feature_cols
+        )
+
+    # 3. EKSPERYMENT bez lap_time
     model_tel, f1_tel, tel_cols = experiment_no_lap_time(
         df, feature_cols, splits
     )
-    print(f"\n📊 F1-macro pełny model:           0.9625")
+    print(f"\n📊 F1-macro pełny model:           0.6822")
     print(f"📊 F1-macro bez lap_time:          {f1_tel:.4f}")
-    print(f"📊 Różnica (koszt usunięcia):       {0.9625 - f1_tel:+.4f}")
+    print(f"📊 Różnica (koszt usunięcia):       {0.6822 - f1_tel:+.4f}")
 
-    # 3. LIVE FEED — stinty z clifem
+    # 4. LIVE FEED — stinty z clifem
     # Znajdź stinty gdzie wystąpił Stan 2
     cliff_stints = (
         df.filter(pl.col("target") == 2)
@@ -386,10 +602,20 @@ if __name__ == "__main__":
     print("\nTop stinty z największą liczbą okien Stan 2:")
     print(cliff_stints)
 
-    for row in cliff_stints.iter_rows(named=True):
+    for i, row in enumerate(cliff_stints.iter_rows(named=True)):
+        # Live feed z oryginalnym modelem
         live_feed_simulation(
             xgb_model, df, feature_cols,
-            session_key  = row["session_key"],
-            driver       = row["driver"],
-            stint_number = row["stint_number"],
+            session_key=row["session_key"],
+            driver=row["driver"],
+            stint_number=row["stint_number"],
         )
+
+        # Live feed z porównaniem (przed/po kalibracji)
+        if xgb_calibrated is not None and i < 3:  # Pokaż dla 3 najlepszych
+            live_feed_comparison(
+                xgb_model, xgb_calibrated, df, feature_cols,
+                session_key=row["session_key"],
+                driver=row["driver"],
+                stint_number=row["stint_number"],
+            )
